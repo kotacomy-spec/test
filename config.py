@@ -1,5 +1,5 @@
 SEARCH_QUERY = "gramedia"
-MAX_PAGES = 20  # Set the number of pages to scrape
+MAX_PAGES = 50  # Set the number of pages to scrape
 DOWNLOAD_LIMIT = 5  # Number of books to download
 MAX_CONCURRENT_DOWNLOADS = 5 # Number of concurrent downloads
 DB_USER = "postgres.odxzslgbroyinxvmudvs"
