@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import csv
 import config
 import psycopg2
+import time
 
 def sanitize_text(text):
     """Sanitizes a string by removing non-ASCII characters.
@@ -32,6 +33,7 @@ def scrape_annas_archive(query, max_pages):
     all_books = []
     for page in range(1, max_pages + 1):
         print(f"Scraping page {page}...")
+        time.sleep(3)
         url = f"https://annas-archive.org/search?index=&page={page}&sort=&ext=pdf&ext=epub&ext=mobi&ext=djvu&src=lgli&lang=en&lang=id&display=&q={query}"
         try:
             response = requests.get(url)

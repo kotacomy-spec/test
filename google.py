@@ -97,51 +97,89 @@ def download_book(book_data):
     update_download_status(md5, 'pending')
     logging.info(f"Starting download for '{title}' (MD5: {md5})")
 
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+
     retries = 3
     for attempt in range(retries):
         try:
-            download_page_url = f"https://libgen.li/ads.php?md5={md5}"
-            logging.info(f"Attempt {attempt + 1} of {retries}: Fetching download page: {download_page_url}")
+            final_download_url = None
 
-            response = requests.get(download_page_url, timeout=5)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
+            # Method 1: libgen.rs (more robust)
+            try:
+                book_page_url = f"http://libgen.rs/book/index.php?md5={md5}"
+                logging.info(f"Method 1: Fetching book page: {book_page_url}")
+                response = requests.get(book_page_url, headers=headers, timeout=20)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
 
-            get_link = soup.find('a', href=lambda href: href and href.startswith('get.php'))
-            if not get_link:
-                if attempt < retries - 1:
-                    logging.warning(f"Attempt {attempt + 1} failed: Could not find download link for '{title}' (MD5: {md5}). Retrying in 30 seconds...")
-                    time.sleep(5) # Increased sleep time
-                    continue
-                else:
-                    update_download_status(md5, 'failed')
-                    logging.error(f"Failed after {retries} attempts: Could not find download link for '{title}' (MD5: {md5})")
-                    return f"Could not find download link for MD5: {md5}"
+                download_page_link = None
+                h2_tag = soup.find('h2')
+                if h2_tag:
+                    download_page_link = h2_tag.find('a', href=True)
 
-            final_download_url = f"https://libgen.li/{get_link['href']}"
+                if download_page_link and download_page_link['href']:
+                    download_page_url = download_page_link['href']
+                    logging.info(f"Method 1: Found download page link: {download_page_url}")
+
+                    response = requests.get(download_page_url, headers=headers, timeout=20)
+                    response.raise_for_status()
+                    soup = BeautifulSoup(response.content, 'html.parser')
+
+                    get_link = soup.find('a', string='GET', href=True)
+                    if get_link:
+                        final_download_url = get_link['href']
+            except Exception as e:
+                logging.warning(f"Method 1 (libgen.rs) failed on attempt {attempt + 1}: {e}")
+
+            # Method 2: libgen.li (original method)
+            if not final_download_url:
+                try:
+                    download_page_url = f"https://libgen.li/ads.php?md5={md5}"
+                    logging.info(f"Method 2: Fetching download page: {download_page_url}")
+                    response = requests.get(download_page_url, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    soup = BeautifulSoup(response.content, 'html.parser')
+
+                    get_link = soup.find('a', href=lambda href: href and href.startswith('get.php'))
+                    if get_link:
+                        final_download_url = f"https://libgen.li/{get_link['href']}"
+                except Exception as e:
+                    logging.warning(f"Method 2 (libgen.li) failed on attempt {attempt + 1}: {e}")
+
+            if not final_download_url:
+                raise Exception("All methods to find download link failed.")
+
             logging.info(f"Attempt {attempt + 1} of {retries}: Found download link: {final_download_url}")
-
             logging.info(f"Attempt {attempt + 1} of {retries}: Downloading '{title}'...")
 
             sanitized_title = "".join(c for c in book_data['title'] if c.isalnum() or c in (' ', '-')).rstrip()
             file_extension = book_data.get('file_type', 'epub').lower()
             filename = f"{sanitized_title}.{file_extension}"
 
-            with requests.get(final_download_url, timeout=60, stream=True) as r:
-                r.raise_for_status()
-                file_content = BytesIO(r.content) # Create BytesIO from content
-            logging.info(f"Attempt {attempt + 1} of {retries}: Successfully downloaded '{title}'")
+            file_content = None
+            mimetype = 'application/octet-stream'  # Default MIME type
+            with requests.get(final_download_url, headers=headers, timeout=60, stream=True) as r:
+                content_type = r.headers.get('Content-Type', '')
+                mimetype = content_type  # Save for Google Drive upload
+                is_error_page = 'text/html' in content_type
 
+                if r.status_code == 200 and not is_error_page:
+                    file_content = BytesIO(r.content)
+                    logging.info(f"Attempt {attempt + 1}: Successfully downloaded '{title}'")
+                elif r.status_code in [502, 505] and not is_error_page:
+                    logging.warning(f"Downloaded '{title}' with status {r.status_code}, but Content-Type ({content_type}) is not HTML. Proceeding carefully.")
+                    file_content = BytesIO(r.content)
+                else:
+                    logging.error(f"Download failed for '{title}' with status {r.status_code} and Content-Type: {content_type}")
+                    r.raise_for_status()  # Trigger retry for other errors
 
             # Build Google Drive service
             drive_service = build('drive', 'v3')
             logging.info("Google Drive service built successfully")
 
-
-            # Define Google Drive folder ID (replace with your actual folder ID)
-            # You can create a folder named "DownloadedBooks" in your Drive and get its ID
-            # For this example, let's assume a folder ID or create one if it doesn't exist.
-            # A robust implementation would find or create the folder dynamically.
+            # Define Google Drive folder ID
             drive_folder_name = "DownloadedBooks"
             drive_folder_id = None
 
@@ -156,7 +194,7 @@ def download_book(book_data):
                 drive_folder_id = items[0]['id']
                 logging.info(f"Found existing folder: '{drive_folder_name}' with ID: {drive_folder_id}")
             else:
-                 # Create the folder if it doesn't exist
+                # Create the folder if it doesn't exist
                 logging.info(f"Folder '{drive_folder_name}' not found, creating...")
                 file_metadata = {
                     'name': drive_folder_name,
@@ -166,15 +204,14 @@ def download_book(book_data):
                 drive_folder_id = folder.get('id')
                 logging.info(f"Created new folder: '{drive_folder_name}' with ID: {drive_folder_id}")
 
-
             # File metadata for Google Drive
             file_metadata = {
                 'name': filename,
-                'parents': [drive_folder_id] if drive_folder_id else [] # Upload to the folder
+                'parents': [drive_folder_id] if drive_folder_id else []
             }
 
             # Media object for upload
-            media = MediaIoBaseUpload(file_content, mimetype=r.headers['Content-Type'], resumable=True)
+            media = MediaIoBaseUpload(file_content, mimetype=mimetype, resumable=True)
 
             logging.info(f"Uploading '{filename}' to Google Drive folder ID: {drive_folder_id}")
 
@@ -187,7 +224,6 @@ def download_book(book_data):
             drive_link = uploaded_file.get('webViewLink')
             logging.info(f"Uploaded file ID: {uploaded_file.get('id')}, Shareable Link: {drive_link}")
 
-
             update_download_status_with_filename(md5, 'success', filename, drive_link)
             logging.info(f"Successfully downloaded, uploaded, and updated database for '{title}' (MD5: {md5})")
 
@@ -196,8 +232,8 @@ def download_book(book_data):
         except requests.exceptions.Timeout:
             logging.warning(f"Attempt {attempt + 1} failed: Timeout downloading book '{title}' with MD5 {md5}.")
             if attempt < retries - 1:
-                logging.info("Retrying in 30 seconds...") # Increased sleep time
-                time.sleep(5)
+                logging.info("Retrying in 30 seconds...")
+                time.sleep(30)
             else:
                 update_download_status(md5, 'failed')
                 logging.error(f"Failed after {retries} attempts: Timeout downloading book '{title}' with MD5 {md5}. Skipping.")
@@ -205,8 +241,8 @@ def download_book(book_data):
         except requests.exceptions.RequestException as e:
             logging.warning(f"Attempt {attempt + 1} failed: Error downloading book '{title}' with MD5 {md5}: {e}")
             if attempt < retries - 1:
-                logging.info("Retrying in 30 seconds...") # Increased sleep time
-                time.sleep(5)
+                logging.info("Retrying in 30 seconds...")
+                time.sleep(30)
             else:
                 update_download_status(md5, 'failed')
                 logging.error(f"Failed after {retries} attempts: Error downloading book '{title}' with MD5 {md5}: {e}")
@@ -214,8 +250,8 @@ def download_book(book_data):
         except Exception as e:
             logging.warning(f"Attempt {attempt + 1} failed: An error occurred for book '{title}' with MD5 {md5}: {e}")
             if attempt < retries - 1:
-                logging.info("Retrying in 30 seconds...") # Increased sleep time
-                time.sleep(5)
+                logging.info("Retrying in 30 seconds...")
+                time.sleep(30)
             else:
                 update_download_status(md5, 'failed')
                 logging.error(f"Failed after {retries} attempts: An error occurred for book '{title}' with MD5 {md5}: {e}")
