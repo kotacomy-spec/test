@@ -4,6 +4,35 @@ import requests
 from bs4 import BeautifulSoup
 import concurrent.futures
 import config
+import threading
+
+csv_lock = threading.Lock()
+
+def update_download_status(md5, status):
+    with csv_lock:
+        with open('books.csv', 'r+', newline='') as f:
+            reader = csv.reader(f)
+            lines = list(reader)
+            if not lines:
+                return
+
+            header = lines[0]
+            try:
+                md5_index = header.index('md5')
+                download_status_index = header.index('download_status')
+            except ValueError:
+                return
+
+            for line in lines[1:]:
+                if len(line) > md5_index and line[md5_index] == md5:
+                    while len(line) <= download_status_index:
+                        line.append('')
+                    line[download_status_index] = status
+                    break
+            f.seek(0)
+            f.truncate()
+            writer = csv.writer(f)
+            writer.writerows(lines)
 
 def download_book(book_data):
     """Downloads a single book.
@@ -24,7 +53,7 @@ def download_book(book_data):
         print(f"Fetching download page: {download_page_url}")
 
         # Get the download page
-        response = requests.get(download_page_url)
+        response = requests.get(download_page_url, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -38,23 +67,31 @@ def download_book(book_data):
 
         # Download the book
         print(f"Downloading {book_data['title']}...")
-        book_response = requests.get(final_download_url)
-        book_response.raise_for_status()
-
+        
         # Sanitize the title to create a valid filename
         sanitized_title = "".join(c for c in book_data['title'] if c.isalnum() or c in (' ', '-')).rstrip()
         file_extension = book_data.get('file_type', 'epub').lower()
         filename = f"{sanitized_title}.{file_extension}"
         filepath = os.path.join('downloads', filename)
 
-        # Save the book to a file
-        with open(filepath, 'wb') as f:
-            f.write(book_response.content)
+        with requests.get(final_download_url, timeout=30, stream=True) as r:
+            r.raise_for_status()
+            with open(filepath, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        
+        update_download_status(md5, 'success')
+
+
         return f"Saved to {filepath}"
 
+    except requests.exceptions.Timeout:
+        return f"Timeout downloading book with MD5 {md5}. Skipping."
     except requests.exceptions.RequestException as e:
+        update_download_status(md5, 'failed')
         return f"Error downloading book with MD5 {md5}: {e}"
     except Exception as e:
+        update_download_status(md5, 'failed')
         return f"An error occurred for book with MD5 {md5}: {e}"
 
 def download_books_from_csv_concurrently(csv_filepath, download_limit, max_workers):
@@ -71,7 +108,15 @@ def download_books_from_csv_concurrently(csv_filepath, download_limit, max_worke
 
     with open(csv_filepath, 'r', encoding='utf-8') as csvfile:
         reader = csv.DictReader(csvfile)
-        books_to_download = [row for i, row in enumerate(reader) if i < download_limit]
+        all_books = [row for row in reader if row]
+
+    books_to_download = []
+    for row in all_books:
+        download_status = row.get('download_status')
+        if not download_status or download_status.lower() != 'success':
+            books_to_download.append(row)
+
+    books_to_download = books_to_download[:download_limit]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_book = {executor.submit(download_book, book_data): book_data for book_data in books_to_download}
