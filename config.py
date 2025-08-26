@@ -1,7 +1,7 @@
 SEARCH_QUERY = "python"
 MAX_PAGES = 3  # Set the number of pages to scrape
-DOWNLOAD_LIMIT = 10  # Number of books to download
-MAX_CONCURRENT_DOWNLOADS = 10 # Number of concurrent downloads
+DOWNLOAD_LIMIT = 5  # Number of books to download
+MAX_CONCURRENT_DOWNLOADS = 5 # Number of concurrent downloads
 DB_USER = "postgres.odxzslgbroyinxvmudvs"
 DB_PASSWORD = "Manchunian199!"
 DB_HOST = "aws-1-ap-southeast-1.pooler.supabase.com"

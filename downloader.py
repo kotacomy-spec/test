@@ -5,34 +5,46 @@ from bs4 import BeautifulSoup
 import concurrent.futures
 import config
 import threading
+import psycopg2
+
+print("Downloader script started")
 
 csv_lock = threading.Lock()
 
+def get_db_connection():
+    """Create and return a database connection."""
+    return psycopg2.connect(
+        dbname=config.DB_NAME,
+        user=config.DB_USER,
+        password=config.DB_PASSWORD,
+        host=config.DB_HOST,
+        port=config.DB_PORT
+    )
+
+def update_download_status_with_filename(md5, status, filename=None):
+    """Update the download status and filename of a book in the database."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if filename:
+            cur.execute(
+                "UPDATE books SET download_status = %s, downloaded_filename = %s WHERE md5 = %s",
+                (status, filename, md5)
+            )
+        else:
+            cur.execute(
+                "UPDATE books SET download_status = %s WHERE md5 = %s",
+                (status, md5)
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except (Exception, psycopg2.DatabaseError) as error:
+        print(f"Error updating download status for MD5 {md5}: {error}")
+
 def update_download_status(md5, status):
-    with csv_lock:
-        with open('books.csv', 'r+', newline='') as f:
-            reader = csv.reader(f)
-            lines = list(reader)
-            if not lines:
-                return
-
-            header = lines[0]
-            try:
-                md5_index = header.index('md5')
-                download_status_index = header.index('download_status')
-            except ValueError:
-                return
-
-            for line in lines[1:]:
-                if len(line) > md5_index and line[md5_index] == md5:
-                    while len(line) <= download_status_index:
-                        line.append('')
-                    line[download_status_index] = status
-                    break
-            f.seek(0)
-            f.truncate()
-            writer = csv.writer(f)
-            writer.writerows(lines)
+    """Update the download status of a book in the database."""
+    update_download_status_with_filename(md5, status)
 
 def download_book(book_data):
     """Downloads a single book.
@@ -47,6 +59,9 @@ def download_book(book_data):
     if not md5:
         return f"Skipping row due to missing MD5: {book_data}"
 
+    # Set status to pending when download starts
+    update_download_status(md5, 'pending')
+    
     try:
         # Construct the URL for the download page
         download_page_url = f"https://libgen.li/ads.php?md5={md5}"
@@ -60,6 +75,7 @@ def download_book(book_data):
         # Find the final download link
         get_link = soup.find('a', href=lambda href: href and href.startswith('get.php'))
         if not get_link:
+            update_download_status(md5, 'failed')
             return f"Could not find download link for MD5: {md5}"
 
         final_download_url = f"https://libgen.li/{get_link['href']}"
@@ -80,12 +96,13 @@ def download_book(book_data):
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
         
-        update_download_status(md5, 'success')
-
+        # Update status to success and save the filename
+        update_download_status_with_filename(md5, 'success', filename)
 
         return f"Saved to {filepath}"
 
     except requests.exceptions.Timeout:
+        update_download_status(md5, 'failed')
         return f"Timeout downloading book with MD5 {md5}. Skipping."
     except requests.exceptions.RequestException as e:
         update_download_status(md5, 'failed')
@@ -95,10 +112,10 @@ def download_book(book_data):
         return f"An error occurred for book with MD5 {md5}: {e}"
 
 def download_books_from_csv_concurrently(csv_filepath, download_limit, max_workers):
-    """Reads a CSV file of books and downloads them concurrently.
+    """Reads books from the database and downloads them concurrently.
 
     Args:
-        csv_filepath: The path to the CSV file.
+        csv_filepath: The path to the CSV file (no longer used but kept for compatibility).
         download_limit: The maximum number of books to download.
         max_workers: The maximum number of concurrent downloads.
     """
@@ -106,20 +123,33 @@ def download_books_from_csv_concurrently(csv_filepath, download_limit, max_worke
     if not os.path.exists('downloads'):
         os.makedirs('downloads')
 
-    with open(csv_filepath, 'r', encoding='utf-8') as csvfile:
-        reader = csv.DictReader(csvfile)
-        all_books = [row for row in reader if row]
-
-    books_to_download = []
-    for row in all_books:
-        download_status = row.get('download_status')
-        if not download_status or download_status.lower() != 'success':
-            books_to_download.append(row)
-
-    books_to_download = books_to_download[:download_limit]
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT title, md5, file_type FROM books 
+               WHERE download_status IS NULL 
+               LIMIT %s""",
+            (download_limit,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        print(f"Found {len(rows)} books to download")
+        
+        # Convert rows to list of dictionaries
+        all_books = [{"title": row[0], "md5": row[1], "file_type": row[2]} for row in rows]
+        
+        if not all_books:
+            print("No books found with NULL download status")
+            return
+    except (Exception, psycopg2.DatabaseError) as error:
+        print(f"Error fetching books from database: {error}")
+        return
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_book = {executor.submit(download_book, book_data): book_data for book_data in books_to_download}
+        future_to_book = {executor.submit(download_book, book_data): book_data for book_data in all_books}
         for future in concurrent.futures.as_completed(future_to_book):
             book_data = future_to_book[future]
             try:

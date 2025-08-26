@@ -1,0 +1,2 @@
+# Save your authorization code here after visiting the authentication URL
+# Then run: python drive_uploader_codespaces.py --use-code
