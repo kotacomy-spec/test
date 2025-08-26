@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import csv
 import config
+import psycopg2
 
 def sanitize_text(text):
     """Sanitizes a string by removing non-ASCII characters.
@@ -96,23 +97,65 @@ def scrape_annas_archive(query, max_pages):
     return all_books
 
 if __name__ == "__main__":
-    """Main execution block of the script.
-
-    This block is executed when the script is run directly.
-    It scrapes the books based on the configuration in config.py
-    and saves the data to a CSV file.
-    """
-    # Scrape the books using the settings from config.py
     scraped_books = scrape_annas_archive(config.SEARCH_QUERY, config.MAX_PAGES)
 
     if scraped_books:
-        # Write the scraped data to a CSV file
-        with open('books.csv', 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = scraped_books[0].keys()
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        try:
+            conn = psycopg2.connect(
+                dbname=config.DB_NAME,
+                user=config.DB_USER,
+                password=config.DB_PASSWORD,
+                host=config.DB_HOST,
+                port=config.DB_PORT
+            )
+            cur = conn.cursor()
 
-            writer.writeheader()
-            writer.writerows(scraped_books)
-        print(f"Data saved to books.csv. Scraped {len(scraped_books)} books.")
+            # Create table if it doesn't exist
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS books (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT,
+                    author TEXT,
+                    link TEXT,
+                    md5 TEXT UNIQUE,
+                    publisher TEXT,
+                    cover_image TEXT,
+                    language TEXT,
+                    file_type TEXT,
+                    file_size TEXT,
+                    year TEXT,
+                    book_type TEXT,
+                    download_status TEXT
+                )
+            """)
+
+            # Insert data
+            for book in scraped_books:
+                cur.execute("""
+                    INSERT INTO books (title, author, link, md5, publisher, cover_image, language, file_type, file_size, year, book_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (md5) DO NOTHING
+                """, (
+                    book.get('title'),
+                    book.get('author'),
+                    book.get('link'),
+                    book.get('md5'),
+                    book.get('publisher'),
+                    book.get('cover_image'),
+                    book.get('language'),
+                    book.get('file_type'),
+                    book.get('file_size'),
+                    book.get('year'),
+                    book.get('book_type')
+                ))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f"Data saved to PostgreSQL database. Scraped {len(scraped_books)} books.")
+
+        except (Exception, psycopg2.DatabaseError) as error:
+            print(error)
+
     else:
         print("No books found or an error occurred.")
